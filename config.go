@@ -80,7 +80,7 @@ type BurrowConfig struct {
 	Email map[string]*struct {
 		Groups    []string `gcfg:"group"`
 		Interval  int      `gcfg:"interval"`
-		Threshold string   `gcfg:"threhsold"`
+		Threshold string   `gcfg:"threshold"`
 	}
 	Httpnotifier struct {
 		Url            string   `gcfg:"url"`
