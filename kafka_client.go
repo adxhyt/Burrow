@@ -262,8 +262,8 @@ func (client *KafkaClient) getMsgFromPusher() {
 		for group, groupInfo := range pusherDataMap {
 			for topic, topicInfo := range groupInfo {
 				for partition, offset := range topicInfo {
-					if temp, err := strconv.ParseInt(partition, 10, 32); err != nil {
-						log.Infof("ifuck data\n", temp)
+					if temp, err = strconv.ParseInt(partition, 10, 32); err != nil {
+						log.Errorf("parse data err, group:%v, topic:%v, partition:%v\n", getGroupNameByUrl(group), topic, temp)
 						continue
 					}
 

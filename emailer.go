@@ -123,7 +123,7 @@ OUTERLOOP:
 			// Send an email if any of the results breaches the threshold
 			for _, result := range results {
 				if result.Status >= thresholdVal {
-					log.Infof("log email, topic: %v, partition: %v, status: %v, rule: %v\n", result.Topic, result.Partition, result.Status, result.Rule)
+					log.Infof("log email status: %v, data: %v\n", result.Status, result)
 					emailer.sendEmail(email, results)
 					break
 				}
