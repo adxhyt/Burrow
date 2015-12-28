@@ -12,10 +12,16 @@ package main
 
 import (
 	"bytes"
+	"crypto/md5"
 	"encoding/binary"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"github.com/Shopify/sarama"
 	log "github.com/cihub/seelog"
+	"io/ioutil"
+	"net/http"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -34,6 +40,7 @@ type KafkaClient struct {
 	topicMap           map[string]int
 	topicMapLock       sync.RWMutex
 	brokerOffsetTicker *time.Ticker
+	pusherTicker       *time.Ticker
 }
 
 type BrokerTopicRequest struct {
@@ -71,20 +78,15 @@ func NewKafkaClient(app *ApplicationContext, cluster string) (*KafkaClient, erro
 		topicMapLock:   sync.RWMutex{},
 	}
 
-	// Start the main processor goroutines for __consumer_offset messages
-	client.wgProcessor.Add(2)
-	go func() {
-		defer client.wgProcessor.Done()
-		for msg := range client.messageChannel {
-			go client.processConsumerOffsetsMessage(msg)
-		}
-	}()
-	go func() {
-		defer client.wgProcessor.Done()
-		for err := range client.errorChannel {
-			log.Errorf("Consume error on %s:%v: %v", err.Topic, err.Partition, err.Err)
-		}
-	}()
+	if client.app.Config.Pusher.PusherSwitcher {
+		//client.getMsgFromPusher()
+		client.pusherTicker = time.NewTicker(time.Duration(client.app.Config.Pusher.PusherTimeout) * time.Second)
+		go func() {
+			for _ = range client.pusherTicker.C {
+				client.getMsgFromPusher()
+			}
+		}()
+	}
 
 	// Start goroutine to handle topic metadata requests. Do this first because the getOffsets call needs this working
 	client.RefreshTopicMap()
@@ -103,36 +105,6 @@ func NewKafkaClient(app *ApplicationContext, cluster string) (*KafkaClient, erro
 		}
 	}()
 
-	// Get a partition count for the consumption topic
-	partitions, err := client.client.Partitions(client.app.Config.Kafka[client.cluster].OffsetsTopic)
-	if err != nil {
-		return nil, err
-	}
-
-	// Start consumers for each partition with fan in
-	client.partitionConsumers = make([]sarama.PartitionConsumer, len(partitions))
-	log.Infof("Starting consumers for %v partitions of %s in cluster %s", len(partitions), client.app.Config.Kafka[client.cluster].OffsetsTopic, client.cluster)
-	for i, partition := range partitions {
-		pconsumer, err := client.masterConsumer.ConsumePartition(client.app.Config.Kafka[client.cluster].OffsetsTopic, partition, sarama.OffsetNewest)
-		if err != nil {
-			return nil, err
-		}
-		client.partitionConsumers[i] = pconsumer
-		client.wgFanIn.Add(2)
-		go func() {
-			defer client.wgFanIn.Done()
-			for msg := range pconsumer.Messages() {
-				client.messageChannel <- msg
-			}
-		}()
-		go func() {
-			defer client.wgFanIn.Done()
-			for err := range pconsumer.Errors() {
-				client.errorChannel <- err
-			}
-		}()
-	}
-
 	return client, nil
 }
 
@@ -150,6 +122,7 @@ func (client *KafkaClient) Stop() {
 
 	// Stop the offset checker and the topic metdata refresh and request channel
 	client.brokerOffsetTicker.Stop()
+	client.pusherTicker.Stop()
 	close(client.requestChannel)
 }
 
@@ -264,64 +237,87 @@ func readString(buf *bytes.Buffer) (string, error) {
 	return string(strbytes), nil
 }
 
-func (client *KafkaClient) processConsumerOffsetsMessage(msg *sarama.ConsumerMessage) {
-	var keyver, valver uint16
-	var partition uint32
-	var offset, timestamp uint64
+type RetMsg struct {
+	Data   map[string]map[string]map[string]*response
+	Errmsg string
+	Errno  int
+}
 
-	buf := bytes.NewBuffer(msg.Key)
-	err := binary.Read(buf, binary.BigEndian, &keyver)
-	if (err != nil) || ((keyver != 0) && (keyver != 1)) {
-		log.Warnf("Failed to decode %s:%v offset %v: keyver", msg.Topic, msg.Partition, msg.Offset)
-		return
-	}
-	group, err := readString(buf)
-	if err != nil {
-		log.Warnf("Failed to decode %s:%v offset %v: group", msg.Topic, msg.Partition, msg.Offset)
-		return
-	}
-	topic, err := readString(buf)
-	if err != nil {
-		log.Warnf("Failed to decode %s:%v offset %v: topic", msg.Topic, msg.Partition, msg.Offset)
-		return
-	}
-	err = binary.Read(buf, binary.BigEndian, &partition)
-	if err != nil {
-		log.Warnf("Failed to decode %s:%v offset %v: partition", msg.Topic, msg.Partition, msg.Offset)
-		return
-	}
+type response struct {
+	CurrRecordOpTime int64  `json:CurrRecordOpTime`
+	LogId            string `json:LogId`
+	Offset           int64  `json:Offset`
+}
 
-	buf = bytes.NewBuffer(msg.Value)
-	err = binary.Read(buf, binary.BigEndian, &valver)
-	if (err != nil) || ((valver != 0) && (valver != 1)) {
-		log.Warnf("Failed to decode %s:%v offset %v: valver", msg.Topic, msg.Partition, msg.Offset)
-		return
-	}
-	err = binary.Read(buf, binary.BigEndian, &offset)
-	if err != nil {
-		log.Warnf("Failed to decode %s:%v offset %v: offset", msg.Topic, msg.Partition, msg.Offset)
-		return
-	}
-	_, err = readString(buf)
-	if err != nil {
-		log.Warnf("Failed to decode %s:%v offset %v: metadata", msg.Topic, msg.Partition, msg.Offset)
-		return
-	}
-	err = binary.Read(buf, binary.BigEndian, &timestamp)
-	if err != nil {
-		log.Warnf("Failed to decode %s:%v offset %v: timestamp", msg.Topic, msg.Partition, msg.Offset)
-		return
-	}
+func (client *KafkaClient) getMsgFromPusher() {
+	var pusherDataMap map[string]map[string]map[string]*response
+	var err error
+	var temp int64
 
-	// fmt.Printf("[%s,%s,%v]::OffsetAndMetadata[%v,%s,%v]\n", group, topic, partition, offset, metadata, timestamp)
-	partitionOffset := &PartitionOffset{
-		Cluster:   client.cluster,
-		Topic:     topic,
-		Partition: int32(partition),
-		Group:     group,
-		Timestamp: int64(timestamp),
-		Offset:    int64(offset),
+	for _, pusherurl := range client.app.Config.Pusher.PusherUrl {
+		if pusherDataMap, err = getPusherData(pusherurl, client.app.Config.Pusher.PusherTimeout); err != nil {
+			continue
+		}
+
+		for group, groupInfo := range pusherDataMap {
+			for topic, topicInfo := range groupInfo {
+				for partition, offset := range topicInfo {
+					if temp, err := strconv.ParseInt(partition, 10, 32); err != nil {
+						log.Infof("ifuck data\n", temp)
+						continue
+					}
+
+					partitionOffset := &PartitionOffset{
+						Cluster:   client.cluster,
+						Topic:     topic,
+						Partition: int32(temp),
+						Group:     getGroupNameByUrl(group),
+						Timestamp: int64(offset.CurrRecordOpTime),
+						Offset:    int64(offset.Offset),
+					}
+					timeoutSendOffset(client.app.Storage.offsetChannel, partitionOffset, 1)
+					log.Infof("tracker data => cluster:%v, topic:%v, partition:%v, group:%v, time:%v, offset:%v, data:%v\n", client.cluster, topic, partition, getGroupNameByUrl(group), offset.CurrRecordOpTime, offset.Offset, offset)
+				}
+			}
+		}
 	}
-	timeoutSendOffset(client.app.Storage.offsetChannel, partitionOffset, 1)
 	return
+}
+
+func getPusherData(url string, timeout int) (map[string]map[string]map[string]*response, error) {
+	var msg *RetMsg
+	var err error
+	client := http.Client{
+		Timeout: time.Duration(timeout) * time.Second,
+	}
+	resp, err := client.Get(url)
+	if err != nil { // add double check
+		resp, err = client.Get(url)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	defer resp.Body.Close()
+	body, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	err = json.Unmarshal([]byte(body), &msg)
+	if err != nil {
+		return nil, err
+	}
+
+	if msg.Errno != 0 {
+		return nil, err
+	}
+	return msg.Data, nil
+}
+
+func getGroupNameByUrl(url string) string {
+	m := md5.New()
+	m.Write([]byte(url))
+	s := hex.EncodeToString(m.Sum(nil))
+	return s
 }

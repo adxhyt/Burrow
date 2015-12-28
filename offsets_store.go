@@ -89,6 +89,7 @@ type PartitionStatus struct {
 	Status    StatusConstant `json:"status"`
 	Start     ConsumerOffset `json:"start"`
 	End       ConsumerOffset `json:"end"`
+	Rule      int            `json:"rule"`
 }
 
 type ConsumerGroupStatus struct {
@@ -235,6 +236,8 @@ func (storage *OffsetStorage) addBrokerOffset(offset *PartitionOffset) {
 		partitionEntry.Timestamp = offset.Timestamp
 	}
 
+	log.Infof("broker offset: topic:%v, partition:%v, offset:%v, timestamp:%v \n", offset.Topic, offset.Partition, offset.Offset, offset.Timestamp)
+
 	clusterMap.brokerLock.Unlock()
 }
 
@@ -331,6 +334,8 @@ func (storage *OffsetStorage) addConsumerOffset(offset *PartitionOffset) {
 		ringval.Timestamp = offset.Timestamp
 		ringval.Lag = partitionLag
 	}
+
+	log.Infof("consumer offset: group: %v, topic:%v, partition:%v, data:%v\n", offset.Group, offset.Topic, offset.Partition, consumerPartitionRing.Value.(*ConsumerOffset))
 
 	// Advance the ring pointer
 	consumerTopicMap[offset.Partition] = consumerTopicMap[offset.Partition].Next()
@@ -458,6 +463,7 @@ func (storage *OffsetStorage) evaluateGroup(cluster string, group string, result
 				Status:    StatusOK,
 				Start:     firstOffset,
 				End:       lastOffset,
+				Rule:      0,
 			}
 
 			// Check if this partition is the one with the most lag currently
@@ -472,6 +478,7 @@ func (storage *OffsetStorage) evaluateGroup(cluster string, group string, result
 					// No, so the consumer is actually stopped
 					status.Status = StatusError
 					thispart.Status = StatusStop
+					thispart.Rule = 4
 					status.Partitions = append(status.Partitions, thispart)
 					continue
 				}
@@ -484,6 +491,7 @@ func (storage *OffsetStorage) evaluateGroup(cluster string, group string, result
 					status.Status = StatusError
 					thispart.Status = StatusRewind
 					status.Partitions = append(status.Partitions, thispart)
+					thispart.Rule = 6
 					continue
 				}
 			}
@@ -505,8 +513,11 @@ func (storage *OffsetStorage) evaluateGroup(cluster string, group string, result
 				}
 
 				// Rule 2
-				status.Status = StatusError
-				thispart.Status = StatusStall
+				if offsets[maxidx].Lag > 1 {
+					status.Status = StatusError
+					thispart.Status = StatusStall
+					thispart.Rule = 2
+				}
 			} else {
 				// Rule 1 passes, or shortcut a full check on Rule 3 if we can
 				if (firstOffset.Lag == 0) || (lastOffset.Lag <= firstOffset.Lag) {
@@ -529,6 +540,7 @@ func (storage *OffsetStorage) evaluateGroup(cluster string, group string, result
 					// Rule 3
 					if status.Status == StatusOK {
 						status.Status = StatusWarning
+						thispart.Rule = 3
 					}
 					thispart.Status = StatusWarning
 				}
@@ -540,6 +552,7 @@ func (storage *OffsetStorage) evaluateGroup(cluster string, group string, result
 			}
 		}
 	}
+	log.Infof("evalue group: group: %v, status:%v, partition_status:%v\n", group, status.Status, status.Partitions)
 	resultChannel <- status
 }
 

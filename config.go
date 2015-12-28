@@ -32,6 +32,12 @@ type BurrowConfig struct {
 		ClientID       string `gcfg:"client-id"`
 		GroupBlacklist string `gcfg:"group-blacklist"`
 	}
+	Pusher struct {
+		PusherUrl      []string `gcfg:"pusher-url"`
+		PusherInterval int      `gcfg:"pusher-interval"`
+		PusherTimeout  int      `gcfg:"pusher-timeout"`
+		PusherSwitcher bool     `gcfg:"pusher-switcher"`
+	}
 	Zookeeper struct {
 		Hosts    []string `gcfg:"hostname"`
 		Port     int      `gcfg:"port"`
@@ -136,6 +142,17 @@ func ValidateConfig(app *ApplicationContext) error {
 		if !validateTopic(app.Config.General.ClientID) {
 			errs = append(errs, "Kafka client ID is not valid")
 		}
+	}
+
+	// http handler to get msg instead of sarama message
+	if len(app.Config.Pusher.PusherUrl) == 0 {
+		errs = append(errs, "No Pusher url specified")
+	}
+	if app.Config.Pusher.PusherInterval == 0 {
+		app.Config.Pusher.PusherInterval = 60
+	}
+	if app.Config.Pusher.PusherTimeout == 0 {
+		app.Config.Pusher.PusherTimeout = 3
 	}
 
 	// Zookeeper
@@ -251,7 +268,7 @@ func ValidateConfig(app *ApplicationContext) error {
 		app.Config.Lagcheck.StormCheck = 60
 	}
 	if app.Config.Lagcheck.MinDistance == 0 {
-		app.Config.Lagcheck.MinDistance = 1
+		app.Config.Lagcheck.MinDistance = 10
 	}
 	if app.Config.Lagcheck.ZKGroupRefresh == 0 {
 		app.Config.Lagcheck.ZKGroupRefresh = 300
@@ -410,7 +427,7 @@ func validateZookeeperPath(path string) bool {
 }
 
 func validateTopic(topic string) bool {
-	matches, _ := regexp.MatchString(`^[a-zA-Z0-9_\-]+$`, topic)
+	matches, _ := regexp.MatchString(`^[a-zA-Z0-9_:.\-\/]+$`, topic)
 	return matches
 }
 
