@@ -80,7 +80,7 @@ func NewKafkaClient(app *ApplicationContext, cluster string) (*KafkaClient, erro
 
 	if client.app.Config.Pusher.PusherSwitcher {
 		//client.getMsgFromPusher()
-		client.pusherTicker = time.NewTicker(time.Duration(client.app.Config.Pusher.PusherTimeout) * time.Second)
+		client.pusherTicker = time.NewTicker(time.Duration(client.app.Config.Pusher.PusherInterval) * time.Second)
 		go func() {
 			for _ = range client.pusherTicker.C {
 				client.getMsgFromPusher()

@@ -189,6 +189,7 @@ func (zkClient *ZookeeperClient) getOffsetForPartition(consumerGroup string, top
 		Timestamp: zkNodeStat.Mtime,
 		Offset:    offset,
 	}
+	log.Infof("Offset value (%v) for partition %s:%v for group %s in cluster %s", offset, topic, partition, consumerGroup, zkClient.cluster)
 	timeoutSendOffset(zkClient.app.Storage.offsetChannel, partitionOffset, 1)
 }
 
